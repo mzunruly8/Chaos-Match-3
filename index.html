@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chaotic Match-3</title>
+  <meta charset="UTF-8">
+  <style>
+    body { margin: 0; background: #222; font-family: Arial; color: white; }
+    #gameContainer { position: relative; width: 480px; height: 640px; margin: 20px auto; background: #111; }
+    canvas { border: 2px solid #444; display: block; }
+    #ui { position: absolute; top: 10px; left: 10px; }
+    #levelPrep { 
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+      background: rgba(0,0,0,0.9); color: white; display: none; text-align: center;
+      padding-top: 200px; box-sizing: border-box;
+    }
+    #boosterGrid button { 
+      font-size: 32px; width: 60px; height: 60px; margin: 5px; 
+      background: #444; color: white; border: none; border-radius: 8px;
+    }
+    #boosterGrid button.selected { background: #f90; }
+    button { background: #f90; color: black; border: none; padding: 10px 20px; border-radius: 5px; font-weight: bold; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="gameContainer">
+    <canvas id="game" width="480" height="640"></canvas>
+    <div id="ui">
+      <div>Score: <span id="score">0</span></div>
+      <div>Time: <span id="timer">60</span></div>
+      <div>Level: <span id="level">1</span></div>
+    </div>
+    <div id="levelPrep">
+      <h2 id="levelTitle">Level 1</h2>
+      <p>Select up to 2 boosters:</p>
+      <div id="boosterGrid"></div>
+      <button onclick="startLevel()">Start Level!</button>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const COLS = 8, ROWS = 12, TILE = 48; // Taller board for more action
+    const COLORS = ['#f66','#6f6','#66f','#ff6','#6ff','#f6f','#f99','#9f9'];
+
+    let board = [], selected = null, animating = false;
+    let timer = 60, score = 0, level = 1, combo = 0;
+    let selectedBoosters = [];
+    let gameState = 'menu'; // 'menu', 'playing', 'gameover'
+
+    const BOOSTER_ICONS = {
+      paintBucket: '🪣', broom: '🧹', dragonBreath: '🐲',
+      clover: '☘️', magnetCupid: '💘', slime: '🐌'
+    };
+
+    const BOOSTERS = {
+      paintBucket: {
+        effect(b) {
+          const lucky = randInt(0, COLORS.length-1);
+          for (let c=0; c<COLS; c++) for (let r=0; r<ROWS; r++) {
+            if (Math.random() < 0.15) b[c][r].type = lucky;
+          }
+        }
+      },
+      broom: { effect(b) {
+        // Remove any "bad" tiles later
+      }},
+      dragonBreath: { effect(b) {
+        const row = randInt(0, ROWS-1);
+        for (let c=0; c<COLS; c++) b[c][row] = null;
+        applyGravity();
+      }},
+      clover: { effect() { timer += 10; }},
+      magnetCupid: { effect(b) {
+        // Add special bridge pieces later
+      }},
+      slime: { effect(b) {
+        for (let c=0; c<COLS; c++) for (let r=0; r<ROWS; r++) {
+          if (Math.random() < 0.05) b[c][r].slime = true;
+        }
+      }}
+    };
+
+    function randInt(a,b) { return (Math.random()*(b-a+1)|0)+a; }
+
+    function newBoard() {
+      board = [];
+      for (let c=0; c<COLS; c++) {
+        board[c] = [];
+        for (let r=0; r<ROWS; r++) {
+          board[c][r] = { type: randInt(0, COLORS.length-1), special: null, slime: false };
+        }
+      }
+      // Remove initial matches
+      let matches;
+      do {
+        matches = findMatches();
+        if (matches.length) {
+          matches.forEach(m => { board[m.c][m.r] = null; });
+          applyGravity();
+        }
+      } while (matches.length);
+    }
+
+    function drawBoard() {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      for (let c=0; c<COLS; c++) for (let r=0; r<ROWS; r++) {
+        const tile = board[c][r];
+        if (!tile) continue;
+        const x = c*TILE, y = r*TILE;
+        ctx.fillStyle = tile.slime ? '#0a0' : COLORS[tile.type];
+        ctx.fillRect(x+2, y+2, TILE-4, TILE-4);
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x+1, y+1, TILE-2, TILE-2);
+        if (tile.special) {
+          ctx.fillStyle = '#ff0';
+          ctx.fillRect(x+6, y+6, TILE-12, TILE-12);
+        }
+      }
+    }
+
+    function updateUI() {
+      document.getElementById('score').textContent = score;
+      document.getElementById('timer').textContent = timer;
+      document.getElementById('level').textContent = level;
+    }
+
+    function findMatches() {
+      function applyGravity() {
+  for (let c=0; c<COLS; c++) {
+    let write = ROWS-1;
+    for (let r=ROWS-1; r>=0; r--) {
+      if (board[c][r]) {
+        if (write !== r) board[c][write] = board[c][r];
+        write--;
+      }
+    }
+    while (write >= 0) {
+      board[c][write] = { type: randInt(0,COLORS.length-1), special: null, slime: false };
+      write--;
+    }
+  }
+    }
+      // Horizontal
+      for (let r=0; r<ROWS; r++) {
+        let len=1, start=0;
+        for (let c=1; c<=COLS; c++) {
+          const prev = board[c-1]?.[r], cur = board[c]?.[r];
+          if (!prev || !cur || prev.type !== cur.type) {
+            if (len >= 3) matches.push(...Array.from({length:len}, (_,i)=>({c:start+i,r})));
+            len=1; start=c;
+          } else len++;
+        }
+      }
+      // Vertical
+      for (let c=0; c<COLS; c++) {
+        let len=1, start=0;
+        for (let r=1; r<=ROWS; r++) {
+          const prev = board[c][r-1], cur = board[c][r];
+          if (!prev || !cur || prev.type !== cur.type) {
+            if (len >= 3) matches.push(...Array.from({length:len}, (_,i)=>({c,r:start+i})));
+            len=1; start=r;
+          } else len++;
+        }
+      }
+      return matches;
+    }
+
+    function applyGravity() {
+      for (let c=0; c<COLS; c++) {
+        let write = ROWS-1;
+        for (let r=ROWS-1; r>=0; r--) {
+          if (board[c][r]) {
+            board[c][write--] = board[c][r];
+          }
+        }
+        while (write >= 0) {
+          board[c][write--] = { type: randInt(0,COLORS.length-1), special: null, slime: false };
+        }
+      }
+    }
+
+    function resolveMatches(matches) {
+      if (!matches.length) return;
+      combo++;
+      const unique = {};
+      matches.forEach(m => unique[`${m.c},${m.r}`] = m);
+      Object.values(unique).forEach(m => board[m.c][m.r] = null);
+      score += matches.length * 10 * combo;
+      applyGravity();
+      setTimeout(() => {
+        const next = findMatches();
+        resolveMatches(next);
+        animating = false;
+        drawBoard();
+        updateUI();
+      }, 150);
+    }
+
+    function swapTiles(a, b) {
+      [board[a.c][a.r], board[b.c][b.r]] = [board[b.c][b.r], board[a.c][a.r]];
+    }
+
+    // Input
+    canvas.addEventListener('click', e => {
+      if (gameState !== 'playing' || animating) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left, y = e.clientY - rect.top;
+      const c = (x / TILE)|0, r = (y / TILE)|0;
+      if (c<0 || c>=COLS || r<0 || r>=ROWS) return;
+
+      if (!selected) {
+        selected = {c, r};
+      } else {
+        const dc = Math.abs(selected.c - c), dr = Math.abs(selected.r - r);
+        if (dc + dr === 1) {
+          swapTiles(selected, {c, r});
+          const matches = findMatches();
+          if (matches.length) {
+            animating = true;
+            resolveMatches(matches);
+          } else {
+            swapTiles(selected, {c, r});
+          }
+        }
+        selected = null;
+        drawBoard();
+      }
+    });
+
+    // Timer
+    function gameLoop() {
+      if (gameState === 'playing' && timer > 0) {
+        timer -= 1/60;
+        if (timer <= 0) {
+          gameOver();
+        }
+      }
+      drawBoard();
+      updateUI();
+      requestAnimationFrame(gameLoop);
+    }
+
+    function showBoosterSelection() {
+      gameState = 'menu';
+      document.getElementById('levelPrep').style.display = 'block';
+      document.getElementById('levelTitle').textContent = `Level ${level}`;
+      const grid = document.getElementById('boosterGrid');
+      grid.innerHTML = '';
+      selectedBoosters = [];
+      Object.entries(BOOSTER_ICONS).forEach(([key, icon]) => {
+        const btn = document.createElement('button');
+        btn.textContent = icon;
+        btn.onclick = () => selectBooster(key, btn);
+        grid.appendChild(btn);
+      });
+    }
+
+    function selectBooster(name, btn) {
+      const idx = selectedBoosters.indexOf(name);
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chaotic Match-3</title>
+  <meta charset="UTF-8">
+  <style>
+    body { margin: 0; background: #222; font-family: Arial; color: white; }
+    #gameContainer { position: relative; width: 480px; height: 640px; margin: 20px auto; background: #111; }
+    canvas { border: 2px solid #444; display: block; }
+    #ui { position: absolute; top: 10px; left: 10px; }
+    #levelPrep { 
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+      background: rgba(0,0,0,0.9); color: white; display: none; text-align: center;
+      padding-top: 200px; box-sizing: border-box;
+    }
+    #boosterGrid button { 
+      font-size: 32px; width: 60px; height: 60px; margin: 5px; 
+      background: #444; color: white; border: none; border-radius: 8px;
+    }
+    #boosterGrid button.selected { background: #f90; }
+    button { background: #f90; color: black; border: none; padding: 10px 20px; border-radius: 5px; font-weight: bold; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="gameContainer">
+    <canvas id="game" width="480" height="640"></canvas>
+    <div id="ui">
+      <div>Score: <span id="score">0</span></div>
+      <div>Time: <span id="timer">60</span></div>
+      <div>Level: <span id="level">1</span></div>
+    </div>
+    <div id="levelPrep">
+      <h2 id="levelTitle">Level 1</h2>
+      <p>Select up to 2 boosters:</p>
+      <div id="boosterGrid"></div>
+      <button onclick="startLevel()">Start Level!</button>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const COLS = 8, ROWS = 12, TILE = 48;
+    const COLORS = ['#f66','#6f6','#66f','#ff6','#6ff','#f6f','#f99','#9f9'];
+
+    let board = [], selected = null, animating = false;
+    let timer = 60, score = 0, level = 1, combo = 0;
+    let selectedBoosters = [];
+    let gameState = 'menu';
+
+    const BOOSTER_ICONS = {
+      paintBucket: '🪣', broom: '🧹', dragonBreath: '🐲',
+      clover: '☘️', magnetCupid: '💘', slime: '🐌'
+    };
+
+    const BOOSTERS = {
+      paintBucket: {
+        effect(b) {
+          const lucky = randInt(0, COLORS.length-1);
+          for (let c=0; c<COLS; c++) for (let r=0; r<ROWS; r++) {
+            if (Math.random() < 0.15) b[c][r].type = lucky;
+          }
+        }
+      },
+      broom: { effect(b) { /* later */ }},
+      dragonBreath: { effect(b) {
+        const row = randInt(0, ROWS-1);
+        for (let c=0; c<COLS; c++) b[c][row] = null;
+        applyGravity();
+      }},
+      clover: { effect() { timer += 10; }},
+      magnetCupid: { effect(b) { /* later */ }},
+      slime: { effect(b) {
+        for (let c=0; c<COLS; c++) for (let r=0; r<ROWS; r++) {
+          if (Math.random() < 0.05) b[c][r].slime = true;
+        }
+      }}
+    };
+
+    function randInt(a,b) { return (Math.random()*(b-a+1)|0)+a; }
+
+    function newBoard() {
+      board = [];
+      for (let c=0; c<COLS; c++) {
+        board[c] = [];
+        for (let r=0; r<ROWS; r++) {
+          board[c][r] = { type: randInt(0, COLORS.length-1), special: null, slime: false };
+        }
+      }
+      let matches;
+      do {
+        matches = findMatches();
+        if (matches.length) {
+          matches.forEach(m => { board[m.c][m.r] = null; });
+          applyGravity();
+        }
+      } while (matches.length);
+    }
+
+    function drawBoard() {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      for (let c=0; c<COLS; c++) for (let r=0; r<ROWS; r++) {
+        const tile = board[c][r];
+        if (!tile) continue;
+        const x = c*TILE, y = r*TILE;
+        ctx.fillStyle = tile.slime ? '#0a0' : COLORS[tile.type];
+        ctx.fillRect(x+2, y+2, TILE-4, TILE-4);
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x+1, y+1, TILE-2, TILE-2);
+        if (tile.special) {
+          ctx.fillStyle = '#ff0';
+          ctx.fillRect(x+6, y+6, TILE-12, TILE-12);
+        }
+      }
+    }
+
+    function updateUI() {
+      document.getElementById('score').textContent = Math.floor(score);
+      document.getElementById('timer').textContent = Math.ceil(timer);
+      document.getElementById('level').textContent = level;
+    }
+
+    function findMatches() {
+      const matches = [];
+      // Horizontal matches
+      for (let r=0; r<ROWS; r++) {
+        let len=1, start=0;
+        for (let c=1; c<=COLS; c++) {
+          const prev = board[c-1]?.[r], cur = board[c]?.[r];
+          if (!prev || !cur || prev.type !== cur.type) {
+            if (len >= 3) {
+              for (let i=0; i<len; i++) matches.push({c: start+i, r});
+            }
+            len=1; start=c;
+          } else len++;
+        }
+      }
+      // Vertical matches
+      for (let c=0; c<COLS; c++) {
+        let len=1, start=0;
+        for (let r=1; r<=ROWS; r++) {
+          const prev = board[c][r-1], cur = board[c][r];
+          if (!prev || !cur || prev.type !== cur.type) {
+            if (len >= 3) {
+              for (let i=0; i<len; i++) matches.push({c, r: start+i});
+            }
+            len=1; start=r;
+          } else len++;
+        }
+      }
+      return matches;
+    }
+
+    function applyGravity() {
+      for (let c=0; c<COLS; c++) {
+        let write = ROWS-1;
+        for (let r=ROWS-1; r>=0; r--) {
+          if (board[c][r]) {
+            if (write !== r) board[c][write] = board[c][r];
+            write--;
+          }
+        }
+        while (write >= 0) {
+          board[c][write] = { type: randInt(0,COLORS.length-1), special: null, slime: false };
+          write--;
+        }
+      }
+    }
+
+    function resolveMatches(matches) {
+      if (!matches.length) return;
+      combo++;
+      const unique = {};
+      matches.forEach(m => unique[`${m.c},${m.r}`] = m);
+      Object.values(unique).forEach(m => board[m.c][m.r] = null);
+      score += matches.length * 10 * combo;
+      applyGravity();
+      setTimeout(() => {
+        const next = findMatches();
+        if (next.length) {
+          resolveMatches(next);
+        } else {
+          animating = false;
+        }
+        drawBoard();
+        updateUI();
+      }, 150);
+    }
+
+    function swapTiles(a, b) {
+      [board[a.c][a.r], board[b.c][b.r]] = [board[b.c][b.r], board[a.c][a.r]];
+    }
+
+    canvas.addEventListener('click', e => {
+      if (gameState !== 'playing' || animating) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left, y = e.clientY - rect.top;
+      const c = (x / TILE)|0, r = (y / TILE)|0;
+      if (c<0 || c>=COLS || r<0 || r>=ROWS) return;
+
+      if (!selected) {
+        selected = {c, r};
+        // Visual feedback for selected tile
+        drawBoard();
+        const sx = c*TILE+2, sy = r*TILE+2;
+        ctx.strokeStyle = '#ff0';
+        ctx.lineWidth = 4;
+        ctx.strokeRect(sx, sy, TILE-4, TILE-4);
+      } else {
+        const dc = Math.abs(selected.c - c), dr = Math.abs(selected.r - r);
+        if (dc + dr === 1) {
+          swapTiles(selected, {c, r});
+          const matches = findMatches();
+          if (matches.length) {
+            animating = true;
+            resolveMatches(matches);
+          } else {
+            swapTiles(selected, {c, r});
+            drawBoard();
+          }
+        }
+        selected = null;
+        drawBoard();
+      }
+    });
+
+    function gameLoop() {
+      if (gameState === 'playing' && timer > 0) {
+        timer -= 1/60;
+        if (timer <= 0) gameOver();
+      }
+      drawBoard();
+      updateUI();
+      requestAnimationFrame(gameLoop);
+    }
+
+    function showBoosterSelection() {
+      gameState = 'menu';
+      document.getElementById('levelPrep').style.display = 'block';
+      document.getElementById('levelTitle').textContent = `Level ${level}`;
+      const grid = document.getElementById('boosterGrid');
+      grid.innerHTML = '';
+      selectedBoosters = [];
+      Object.entries(BOOSTER_ICONS).forEach(([key, icon]) => {
+        const btn = document.createElement('button');
+        btn.textContent = icon;
+        btn.onclick = () => selectBooster(key, btn);
+        grid.appendChild(btn);
+      });
+    }
+
+    function selectBooster(name, btn) {
+      const idx = selectedBoosters.indexOf(name);
+      if (idx > -1) {
+        selectedBoosters.splice(idx, 1);
+        btn.classList.remove('selected');
+      } else if (selectedBoosters.length < 2) {
+        selectedBoosters.push(name);
+        btn.classList.add('selected');
+      }
+    }
+
+    function startLevel() {
+      document.getElementById('levelPrep').style.display = 'none';
+      newBoard();
+      selectedBoosters.forEach(name => BOOSTERS[name]?.effect?.(board));
+      gameState = 'playing';
+      timer = 60 + level * 5;
+      combo = 0;
+      score = 0;
+    }
+
+    function gameOver() {
+      gameState = 'gameover';
+      setTimeout(() => {
+        level++;
+        alert(`Level ${level-1} Complete!
+Final Score: ${Math.floor(score)}`);
+        showBoosterSelection();
+      }, 500);
+    }
+
+    showBoosterSelection();
+    gameLoop();
+  </script>
+</body>
+</html>
